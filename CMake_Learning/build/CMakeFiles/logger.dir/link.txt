@@ -1,0 +1,1 @@
+/usr/lib/ccache/c++ CMakeFiles/logger.dir/main.cpp.o CMakeFiles/logger.dir/Mather.cpp.o CMakeFiles/logger.dir/LinkedList.cpp.o -o logger

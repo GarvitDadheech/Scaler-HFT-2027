@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"/home/kartik/logger/build/cmake_install.cmake"
+	],
+	"Parallel" : false
+}
