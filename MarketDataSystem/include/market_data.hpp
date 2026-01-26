@@ -8,19 +8,17 @@
 #include <cstring>
 #include <time.h>
 
-// Compile-time configuration
 constexpr size_t CACHE_LINE_SIZE = 64;
-constexpr size_t RING_BUFFER_SIZE = 65536; // Power of 2 for fast modulo
+constexpr size_t RING_BUFFER_SIZE = 65536;
 constexpr size_t MAX_SUBSCRIBERS = 1;
 
-// Market data message (fixed 128 bytes for alignment)
 struct alignas(64) MarketData {
     char instrument[32];
     double bid;
     double ask;
     uint64_t timestamp_ns;
     uint32_t sequence;
-    uint32_t padding; // Align to 64 bytes
+    uint32_t padding;
     char reserved[32];
 
     MarketData() : bid(0), ask(0), timestamp_ns(0), sequence(0), padding(0) {
@@ -31,14 +29,10 @@ struct alignas(64) MarketData {
 
 static_assert(sizeof(MarketData) == 128, "MarketData must be exactly 128 bytes");
 
-// Lock-free SPSC Ring Buffer
 class SPSCRingBuffer {
 private:
-    // Separate cache lines to prevent false sharing
     alignas(CACHE_LINE_SIZE) std::atomic<uint64_t> write_idx_{0};
     alignas(CACHE_LINE_SIZE) std::atomic<uint64_t> read_idx_{0};
-
-    // Actual buffer (can share cache line since it's read-only during operation)
     std::array<MarketData, RING_BUFFER_SIZE> buffer_;
 
     constexpr size_t mask() const {
@@ -48,40 +42,28 @@ private:
 public:
     SPSCRingBuffer() = default;
 
-    // Producer: Try to push a message
-    // Returns true on success, false if buffer is full
     bool try_push(const MarketData& data) {
         uint64_t write_pos = write_idx_.load(std::memory_order_relaxed);
         uint64_t read_pos = read_idx_.load(std::memory_order_acquire);
 
-        // Check if buffer is full
         if ((write_pos + 1) - read_pos > RING_BUFFER_SIZE) {
-            return false; // Buffer full
+            return false;
         }
 
-        // Place data in buffer
         buffer_[write_pos & mask()] = data;
-
-        // Publish write (release ordering ensures data is visible to consumer)
         write_idx_.store(write_pos + 1, std::memory_order_release);
         return true;
     }
 
-    // Consumer: Try to pop a message
-    // Returns true if a message was available, false if empty
     bool try_pop(MarketData& data) {
         uint64_t read_pos = read_idx_.load(std::memory_order_relaxed);
         uint64_t write_pos = write_idx_.load(std::memory_order_acquire);
 
-        // Check if buffer is empty
         if (read_pos >= write_pos) {
-            return false; // No new data
+            return false;
         }
 
-        // Read data from buffer
         data = buffer_[read_pos & mask()];
-
-        // Update read position (no synchronization needed for SPSC)
         read_idx_.store(read_pos + 1, std::memory_order_relaxed);
         return true;
     }
@@ -97,14 +79,12 @@ public:
     }
 };
 
-// Utility: Get current time in nanoseconds with CLOCK_MONOTONIC_RAW
 inline uint64_t get_time_ns() {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
     return ts.tv_sec * 1'000'000'000ULL + ts.tv_nsec;
 }
 
-// Utility: Format market data as JSON
 inline std::string format_json(const MarketData& data) {
     char buffer[256];
     snprintf(buffer, sizeof(buffer),
@@ -114,11 +94,10 @@ inline std::string format_json(const MarketData& data) {
     return std::string(buffer);
 }
 
-// Latency Histogram for efficient percentile calculation (no sorting needed)
 class LatencyHistogram {
 private:
     static constexpr size_t BUCKET_COUNT = 1000;
-    static constexpr uint64_t MAX_LATENCY_NS = 10'000'000; // 10ms max
+    static constexpr uint64_t MAX_LATENCY_NS = 10'000'000;
     static constexpr uint64_t BUCKET_SIZE_NS = MAX_LATENCY_NS / BUCKET_COUNT;
     
     uint64_t buckets_[BUCKET_COUNT];
@@ -153,7 +132,6 @@ public:
         for (size_t i = 0; i < BUCKET_COUNT; ++i) {
             cumulative += buckets_[i];
             if (cumulative >= target_count) {
-                // Return midpoint of bucket
                 return (i + 0.5) * BUCKET_SIZE_NS;
             }
         }

@@ -12,7 +12,6 @@
 #include <thread>
 #include <csignal>
 
-// Global flag for graceful shutdown
 volatile sig_atomic_t running = 1;
 
 void signal_handler(int signal) {
@@ -39,26 +38,23 @@ void set_cpu_affinity(int cpu_id) {
 }
 
 int main() {
-    // Setup signal handlers
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
     try {
-        set_cpu_affinity(2); // Pin to CPU 2
+        set_cpu_affinity(2);
 
         static constexpr const char* HOST = "127.0.0.1";
         static constexpr uint16_t PORT = 9001;
 
         fmt::print("[CONSUMER-TCP] Connecting to {}:{}\n", HOST, PORT);
 
-        // Create socket
         int sock = socket(AF_INET, SOCK_STREAM, 0);
         if (sock == -1) {
             perror("socket");
             return 1;
         }
 
-        // Connect to publisher with retry
         struct sockaddr_in addr;
         std::memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
@@ -76,7 +72,6 @@ int main() {
             std::this_thread::sleep_for(std::chrono::seconds(1));
             retry_count++;
             
-            // Recreate socket for next attempt
             close(sock);
             sock = socket(AF_INET, SOCK_STREAM, 0);
         }
@@ -89,17 +84,14 @@ int main() {
 
         fmt::print("[CONSUMER-TCP] Connected to publisher\n");
 
-        // Disable Nagle's algorithm on receive side too
         int nodelay = 1;
         setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
-        // Disable delayed ACK (Linux specific)
 #ifdef TCP_QUICKACK
         int quickack = 1;
         setsockopt(sock, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof(quickack));
 #endif
 
-        // Consumer loop
         uint64_t messages_received = 0;
         uint64_t total_latency_ns = 0;
         uint64_t min_latency_ns = UINT64_MAX;
@@ -114,10 +106,8 @@ int main() {
         bool first_message = true;
         uint64_t sequence_gaps = 0;
         
-        // Cache timestamp update interval (update every 100ms)
         const auto timestamp_update_interval = std::chrono::milliseconds(100);
         
-        // Fixed-size buffer for incomplete lines (avoid std::string allocations)
         char recv_buffer[4096];
         char line_buffer[4096];
         size_t line_buffer_pos = 0;
@@ -129,7 +119,7 @@ int main() {
             
             if (bytes_received == -1) {
                 if (errno == EINTR) {
-                    continue; // Signal interruption, continue
+                    continue;
                 }
                 perror("recv");
                 break;
@@ -140,14 +130,12 @@ int main() {
                 break;
             }
 
-            // Process received data and handle incomplete lines
             for (ssize_t i = 0; i < bytes_received; ++i) {
                 if (recv_buffer[i] == '\n') {
                     line_buffer[line_buffer_pos] = '\0';
                     if (line_buffer_pos > 0) {
                         std::string line(line_buffer, line_buffer_pos);
                         
-                        // Update cached timestamp periodically
                         auto now_sys = std::chrono::system_clock::now();
                         if (now_sys - last_log_timestamp >= timestamp_update_interval) {
                             auto time_t_now = std::chrono::system_clock::to_time_t(now_sys);
@@ -157,7 +145,6 @@ int main() {
                             last_log_timestamp = now_sys;
                         }
 
-                        // Simple JSON parsing
                         uint64_t recv_time_ns = get_time_ns();
                         
                         try {
@@ -196,14 +183,12 @@ int main() {
                                 messages_received++;
                                 histogram.record(latency_ns);
 
-                                // Log first few and every 10000th message
                                 if (messages_received <= 10 || sequence % 10000 == 0) {
                                     fmt::print("[{:02d}:{:02d}:{:02d}.{:09d}] {} BID={:.2f} ASK={:.2f} SEQ={} LATENCY={:.1f}µs\n",
                                               cached_tm.tm_hour, cached_tm.tm_min, cached_tm.tm_sec, static_cast<int>(cached_ns),
                                               instrument.c_str(), bid, ask, sequence, latency_ns / 1000.0);
                                 }
 
-                                // Check for sequence gaps
                                 if (!first_message && sequence != last_sequence + 1) {
                                     sequence_gaps++;
                                     fmt::print("[WARNING] Sequence gap: expected {}, got {} (gap: {})\n",
@@ -220,16 +205,13 @@ int main() {
                 } else if (line_buffer_pos < sizeof(line_buffer) - 1) {
                     line_buffer[line_buffer_pos++] = recv_buffer[i];
                 } else {
-                    // Buffer overflow - reset
                     line_buffer_pos = 0;
                 }
             }
 
-            // Periodic statistics
             auto now = std::chrono::steady_clock::now();
             if (now - last_report >= std::chrono::seconds(5)) {
                 if (messages_received > 0) {
-                    // Calculate percentiles from histogram (no sorting needed)
                     uint64_t p50 = histogram.get_percentile(50.0);
                     uint64_t p90 = histogram.get_percentile(90.0);
                     uint64_t p99 = histogram.get_percentile(99.0);

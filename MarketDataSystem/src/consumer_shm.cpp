@@ -9,7 +9,6 @@
 #include <thread>
 #include <csignal>
 
-// Global flag for graceful shutdown
 volatile sig_atomic_t running = 1;
 
 void signal_handler(int signal) {
@@ -36,17 +35,15 @@ void set_cpu_affinity(int cpu_id) {
 }
 
 int main() {
-    // Setup signal handlers
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
     try {
-        set_cpu_affinity(1); // Pin to CPU 1 (same NUMA node as publisher on CPU 0)
+        set_cpu_affinity(1);
 
         static constexpr const char* SHM_NAME = "/market_data_hft";
         static constexpr size_t SHM_SIZE = sizeof(SPSCRingBuffer);
 
-        // Wait for publisher to create shared memory
         fmt::print("[CONSUMER-SHM] Waiting for shared memory to be created...\n");
         
         int shm_fd = -1;
@@ -54,7 +51,7 @@ int main() {
         const int MAX_RETRIES = 100;
 
         while (shm_fd == -1 && retry_count < MAX_RETRIES && running) {
-            shm_fd = shm_open(SHM_NAME, O_RDONLY, 0);
+            shm_fd = shm_open(SHM_NAME, O_RDWR, 0);
             if (shm_fd == -1) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 retry_count++;
@@ -66,9 +63,8 @@ int main() {
             return 1;
         }
 
-        // Map shared memory
         SPSCRingBuffer* buffer = static_cast<SPSCRingBuffer*>(
-            mmap(nullptr, SHM_SIZE, PROT_READ, MAP_SHARED, shm_fd, 0)
+            mmap(nullptr, SHM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0)
         );
 
         if (buffer == MAP_FAILED) {
@@ -79,7 +75,6 @@ int main() {
 
         fmt::print("[CONSUMER-SHM] Connected to shared memory at {:p}\n", (void*)buffer);
 
-        // Consumer loop
         uint64_t messages_received = 0;
         uint64_t total_latency_ns = 0;
         uint64_t min_latency_ns = UINT64_MAX;
@@ -94,7 +89,6 @@ int main() {
         bool first_message = true;
         uint64_t sequence_gaps = 0;
         
-        // Cache timestamp update interval (update every 100ms)
         const auto timestamp_update_interval = std::chrono::milliseconds(100);
 
         fmt::print("[CONSUMER-SHM] Starting to consume messages...\n\n");
@@ -106,14 +100,12 @@ int main() {
                 uint64_t recv_time_ns = get_time_ns();
                 uint64_t latency_ns = recv_time_ns - data.timestamp_ns;
 
-                // Update statistics
                 total_latency_ns += latency_ns;
                 min_latency_ns = std::min(min_latency_ns, latency_ns);
                 max_latency_ns = std::max(max_latency_ns, latency_ns);
                 messages_received++;
                 histogram.record(latency_ns);
 
-                // Update cached timestamp periodically (avoid syscalls in hot path)
                 auto now_sys = std::chrono::system_clock::now();
                 if (now_sys - last_log_timestamp >= timestamp_update_interval) {
                     auto time_t_now = std::chrono::system_clock::to_time_t(now_sys);
@@ -123,7 +115,6 @@ int main() {
                     last_log_timestamp = now_sys;
                 }
 
-                // Log with timestamp (only first few and every 10000th to avoid spam)
                 if (messages_received <= 10 || data.sequence % 10000 == 0) {
                     fmt::print("[{:02d}:{:02d}:{:02d}.{:09d}] {} BID={:.2f} ASK={:.2f} SEQ={} LATENCY={}ns\n",
                               cached_tm.tm_hour, cached_tm.tm_min, cached_tm.tm_sec, static_cast<int>(cached_ns),
@@ -131,7 +122,6 @@ int main() {
                               data.sequence, latency_ns);
                 }
 
-                // Check for sequence gaps
                 if (!first_message && data.sequence != last_sequence + 1) {
                     sequence_gaps++;
                     fmt::print("[WARNING] Sequence gap: expected {}, got {} (gap: {})\n",
@@ -140,11 +130,9 @@ int main() {
                 last_sequence = data.sequence;
                 first_message = false;
 
-                // Periodic statistics
                 auto now = std::chrono::steady_clock::now();
                 if (now - last_report >= std::chrono::seconds(5)) {
                     if (messages_received > 0) {
-                        // Calculate percentiles from histogram (no sorting needed)
                         uint64_t p50 = histogram.get_percentile(50.0);
                         uint64_t p90 = histogram.get_percentile(90.0);
                         uint64_t p99 = histogram.get_percentile(99.0);
@@ -175,15 +163,12 @@ int main() {
                     histogram.reset();
                 }
             } else {
-                // No data available, sleep briefly to avoid CPU spinning
-                // In production, use eventfd or similar for notification
                 std::this_thread::sleep_for(std::chrono::microseconds(1));
             }
         }
 
         fmt::print("\n[CONSUMER-SHM] Shutting down gracefully...\n");
 
-        // Cleanup
         munmap(buffer, SHM_SIZE);
         close(shm_fd);
 

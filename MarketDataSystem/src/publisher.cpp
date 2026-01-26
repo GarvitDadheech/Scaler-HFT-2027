@@ -14,7 +14,6 @@
 #include <sched.h>
 #include <csignal>
 
-// Global flag for graceful shutdown
 volatile sig_atomic_t running = 1;
 
 void signal_handler(int signal) {
@@ -23,7 +22,6 @@ void signal_handler(int signal) {
     }
 }
 
-// Shared memory management
 class SharedMemoryPublisher {
 private:
     static constexpr const char* SHM_NAME = "/market_data_hft";
@@ -34,24 +32,20 @@ private:
 public:
     SharedMemoryPublisher() : shm_fd_(-1), buffer_(nullptr), 
                               shm_size_(sizeof(SPSCRingBuffer)) {
-        // Unlink any existing shared memory first
         shm_unlink(SHM_NAME);
         
-        // Create or open shared memory
         shm_fd_ = shm_open(SHM_NAME, O_CREAT | O_RDWR, S_IRUSR | S_IWUSR);
         if (shm_fd_ == -1) {
             perror("shm_open");
             throw std::runtime_error("Failed to create shared memory");
         }
 
-        // Set size
         if (ftruncate(shm_fd_, shm_size_) == -1) {
             perror("ftruncate");
             close(shm_fd_);
             throw std::runtime_error("Failed to truncate shared memory");
         }
 
-        // Map shared memory
         buffer_ = static_cast<SPSCRingBuffer*>(
             mmap(nullptr, shm_size_, PROT_READ | PROT_WRITE, 
                  MAP_SHARED, shm_fd_, 0)
@@ -63,7 +57,6 @@ public:
             throw std::runtime_error("Failed to map shared memory");
         }
 
-        // Initialize in-place
         new (buffer_) SPSCRingBuffer();
         fmt::print("[PUBLISHER] Shared memory initialized at {:p}\n", (void*)buffer_);
     }
@@ -81,7 +74,6 @@ public:
     SPSCRingBuffer* get() { return buffer_; }
 };
 
-// TCP Server
 class TCPPublisher {
 private:
     int server_socket_;
@@ -91,25 +83,21 @@ private:
 
 public:
     TCPPublisher() : server_socket_(-1), client_socket_(-1) {
-        // Create socket
         server_socket_ = socket(AF_INET, SOCK_STREAM, 0);
         if (server_socket_ == -1) {
             perror("socket");
             throw std::runtime_error("Failed to create socket");
         }
 
-        // Allow reuse of address
         int reuse = 1;
         if (setsockopt(server_socket_, SOL_SOCKET, SO_REUSEADDR, 
                       &reuse, sizeof(reuse)) == -1) {
             perror("setsockopt SO_REUSEADDR");
         }
 
-        // Set socket to non-blocking for accept
         int flags = fcntl(server_socket_, F_GETFL, 0);
         fcntl(server_socket_, F_SETFL, flags | O_NONBLOCK);
 
-        // Bind
         struct sockaddr_in addr;
         std::memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
@@ -122,7 +110,6 @@ public:
             throw std::runtime_error("Failed to bind socket");
         }
 
-        // Listen
         if (listen(server_socket_, 1) == -1) {
             perror("listen");
             close(server_socket_);
@@ -149,23 +136,19 @@ public:
             return false;
         }
 
-        // Disable Nagle's algorithm for low latency
         int nodelay = 1;
         if (setsockopt(client_socket_, IPPROTO_TCP, TCP_NODELAY, 
                       &nodelay, sizeof(nodelay)) == -1) {
             perror("setsockopt TCP_NODELAY");
         }
 
-        // Disable delayed ACK (Linux specific)
 #ifdef TCP_QUICKACK
         int quickack = 1;
         if (setsockopt(client_socket_, IPPROTO_TCP, TCP_QUICKACK, 
                       &quickack, sizeof(quickack)) == -1) {
-            // Not critical if it fails (not available on all systems)
         }
 #endif
 
-        // Set client socket to non-blocking
         int flags = fcntl(client_socket_, F_GETFL, 0);
         fcntl(client_socket_, F_SETFL, flags | O_NONBLOCK);
 
@@ -176,7 +159,6 @@ public:
     bool send_data(const std::string& json_data) {
         if (client_socket_ < 0) return false;
 
-        // Add newline for line-based protocol
         std::string message = json_data + "\n";
 
         ssize_t sent = send(client_socket_, message.c_str(), message.size(), MSG_DONTWAIT);
@@ -195,7 +177,6 @@ public:
     }
 };
 
-// CPU Affinity utilities
 void set_cpu_affinity(int cpu_id) {
 #ifdef __linux__
     cpu_set_t cpuset;
@@ -209,32 +190,24 @@ void set_cpu_affinity(int cpu_id) {
         fmt::print("[AFFINITY] Pinned to CPU {}\n", cpu_id);
     }
 #elif defined(__APPLE__)
-    // macOS doesn't support CPU affinity in the same way as Linux
-    // Thread affinity APIs exist but are different
     fmt::print("[INFO] CPU affinity not supported on macOS (requested CPU {})\n", cpu_id);
 #else
     fmt::print("[WARNING] CPU affinity not supported on this platform\n");
 #endif
 }
 
-// Main publisher loop
 int main() {
-    // Setup signal handlers for graceful shutdown
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
     try {
-        // Pin publisher to CPU 0
         set_cpu_affinity(0);
 
-        // Initialize shared memory
         SharedMemoryPublisher shm_pub;
         SPSCRingBuffer* buffer = shm_pub.get();
 
-        // Initialize TCP server
         TCPPublisher tcp_pub;
 
-        // Wait for client to connect (with timeout)
         fmt::print("[MAIN] Waiting for TCP client...\n");
         
         bool client_connected = false;
@@ -253,7 +226,6 @@ int main() {
             fmt::print("[WARNING] No TCP client connected, continuing anyway\n");
         }
 
-        // Generate and publish market data
         uint32_t sequence = 0;
         const char* instruments[] = {"RELIANCE", "INFY", "TCS", "HDFC"};
         constexpr int NUM_INSTRUMENTS = sizeof(instruments) / sizeof(instruments[0]);
@@ -265,18 +237,15 @@ int main() {
         uint64_t total_published = 0;
         uint64_t total_failed_shm = 0;
 
-        // Publish at 100kHz (10µs per message)
         const auto interval = std::chrono::nanoseconds(10'000);
         auto next_publish = std::chrono::steady_clock::now() + interval;
 
         while (running) {
-            // Wait until next publish time
             auto now = std::chrono::steady_clock::now();
             if (now < next_publish) {
                 std::this_thread::sleep_for(next_publish - now);
             }
 
-            // Prepare market data
             MarketData data;
             std::strcpy(data.instrument, instruments[sequence % NUM_INSTRUMENTS]);
             data.bid = 2850.25 + (sequence % 100) * 0.05;
@@ -284,13 +253,10 @@ int main() {
             data.timestamp_ns = get_time_ns();
             data.sequence = sequence++;
 
-            // Publish to shared memory (non-blocking)
             if (!buffer->try_push(data)) {
                 total_failed_shm++;
-                // Ring buffer full - this shouldn't happen in normal operation
             }
 
-            // Publish to TCP (non-blocking)
             if (client_connected) {
                 std::string json = format_json(data);
                 if (!tcp_pub.send_data(json)) {
@@ -300,14 +266,12 @@ int main() {
 
             total_published++;
 
-            // Try to reconnect TCP if disconnected
             if (!client_connected && sequence % 10000 == 0) {
                 if (tcp_pub.accept_client()) {
                     client_connected = true;
                 }
             }
 
-            // Periodic report
             auto now_report = std::chrono::steady_clock::now();
             if (now_report - last_report >= std::chrono::seconds(5)) {
                 double elapsed = std::chrono::duration<double>(now_report - last_report).count();
